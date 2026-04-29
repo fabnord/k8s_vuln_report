@@ -17,6 +17,7 @@ import json
 import datetime
 from argparse import ArgumentParser, RawTextHelpFormatter
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -196,6 +197,28 @@ def build_report(containers: list, cv: ContainerVulnerabilities,
     processed    = 0
     report       = {}
 
+    # Flatten all images for parallel fetching
+    all_tasks = [
+        (ns, dk, meta)
+        for ns, imgs in ns_image_map.items()
+        for dk, meta in imgs.items()
+    ]
+
+    # Fetch all vulnerabilities in parallel
+    vuln_cache: dict[tuple, list] = {}
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        future_map = {
+            pool.submit(fetch_vulns_for_container, cv, meta["container_id"], severity_threshold): (ns, dk, meta)
+            for ns, dk, meta in all_tasks
+        }
+        for future in as_completed(future_map):
+            ns_key, dk, meta = future_map[future]
+            vuln_cache[(ns_key, dk)] = future.result()
+            processed += 1
+            if processed % 10 == 0 or processed == total_images:
+                print(f"  Fetching vulns: {processed}/{total_images} images …", end="\r", flush=True)
+    print()  # newline after progress line
+
     for ns, images in sorted(ns_image_map.items()):
         ns_entry = {
             "namespace":       ns,
@@ -207,12 +230,8 @@ def build_report(containers: list, cv: ContainerVulnerabilities,
         }
 
         for digest_key, img_meta in images.items():
-            processed += 1
-            if processed % 25 == 0 or processed == total_images:
-                print(f"  Fetching vulns: {processed}/{total_images} images …", end="\r", flush=True)
-
             container_id = img_meta["container_id"]
-            raw_vulns    = fetch_vulns_for_container(cv, container_id, severity_threshold)
+            raw_vulns    = vuln_cache.get((ns, digest_key), [])
 
             # Filter and normalise
             vulns = []
@@ -255,7 +274,6 @@ def build_report(containers: list, cv: ContainerVulnerabilities,
         if ns_entry["total_cves"] > 0 or not min_vulns:
             report[ns] = ns_entry
 
-    print()  # newline after progress line
     return report
 
 
