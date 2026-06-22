@@ -2,24 +2,35 @@
 
 Reports container image vulnerabilities from CrowdStrike Falcon, grouped by Kubernetes namespace. For each namespace it shows affected images, CVE IDs, CVSS scores, severity, fix availability, and exploit status.
 
+Available as both a **CLI script** and an **interactive web dashboard**.
+
 ## Requirements
 
-- Python 3.9+
-- `crowdstrike-falconpy` package
+- Python 3.13+
+- [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- `crowdstrike-falconpy` and `flask` packages
 - CrowdStrike Falcon API credentials with the following scopes:
   - **Kubernetes Protection** — Read
   - **Container Vulnerabilities** — Read
 - Falcon Kubernetes Admission Controller (KAC) deployed in the target clusters
 
-Install the dependency:
+## Installation
 
 ```bash
-pip install crowdstrike-falconpy
+uv sync
+```
+
+Or with pip:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install crowdstrike-falconpy flask
 ```
 
 ## Credentials
 
-The script resolves credentials in this priority order:
+The scripts resolve credentials in this priority order:
 
 1. `--client_id` / `--client_secret` CLI flags
 2. `~/.falconpy/credentials` file (INI format)
@@ -46,10 +57,35 @@ Multiple named profiles are supported — select one with `--profile`.
 | `usgov1` | US Gov 1                       |
 | `usgov2` | US Gov 2                       |
 
-## Usage
+---
+
+## Web Dashboard
+
+```bash
+uv run python server.py
+# or: python3 server.py
+```
+
+Opens a local dashboard at `http://127.0.0.1:5000/`. Select cluster, namespace, and severity filters, then click **Run Report** to stream live results. Progress is shown while vulnerabilities are fetched.
+
+**Options:**
+
+| Flag | Description |
+|------|-------------|
+| `--port PORT` | Port to listen on (default: `5000`) |
+| `--host HOST` | Bind address (default: `127.0.0.1`) |
+| `-k`, `--client_id` | Falcon API Client ID |
+| `-s`, `--client_secret` | Falcon API Client Secret |
+| `-b`, `--base_url` | Cloud region |
+| `-p`, `--profile` | Credential profile (default: `default`) |
+
+---
+
+## CLI Usage
 
 ```
-python3 k8s_namespace_vuln_report.py [OPTIONS]
+uv run python k8s_namespace_vuln_report.py [OPTIONS]
+# or: python3 k8s_namespace_vuln_report.py [OPTIONS]
 ```
 
 ### Options
@@ -71,48 +107,55 @@ python3 k8s_namespace_vuln_report.py [OPTIONS]
 | `--no-console` | Suppress the console report (useful when writing files only) |
 | `--page-size` | API page size for container queries (default: `500`) |
 
-## Examples
+### Examples
 
 **Full report across all namespaces:**
 
 ```bash
-python3 k8s_namespace_vuln_report.py
+uv run python k8s_namespace_vuln_report.py
+# or: python3 k8s_namespace_vuln_report.py
 ```
 
 **Critical and high CVEs only:**
 
 ```bash
-python3 k8s_namespace_vuln_report.py --severity HIGH
+uv run python k8s_namespace_vuln_report.py --severity HIGH
+# or: python3 k8s_namespace_vuln_report.py --severity HIGH
 ```
 
 **Single namespace:**
 
 ```bash
-python3 k8s_namespace_vuln_report.py --namespace kube-system
+uv run python k8s_namespace_vuln_report.py --namespace kube-system
+# or: python3 k8s_namespace_vuln_report.py --namespace kube-system
 ```
 
 **Single cluster, export to CSV:**
 
 ```bash
-python3 k8s_namespace_vuln_report.py --cluster prod-cluster --output-csv report.csv
+uv run python k8s_namespace_vuln_report.py --cluster prod-cluster --output-csv report.csv
+# or: python3 k8s_namespace_vuln_report.py --cluster prod-cluster --output-csv report.csv
 ```
 
 **Include stopped containers, export JSON only:**
 
 ```bash
-python3 k8s_namespace_vuln_report.py --all-containers --no-console --output-json report.json
+uv run python k8s_namespace_vuln_report.py --all-containers --no-console --output-json report.json
+# or: python3 k8s_namespace_vuln_report.py --all-containers --no-console --output-json report.json
 ```
 
 **MSSP — run against a child tenant:**
 
 ```bash
-python3 k8s_namespace_vuln_report.py --member_cid <child_cid>
+uv run python k8s_namespace_vuln_report.py --member_cid <child_cid>
+# or: python3 k8s_namespace_vuln_report.py --member_cid <child_cid>
 ```
 
 **Non-default credential profile:**
 
 ```bash
-python3 k8s_namespace_vuln_report.py --profile production
+uv run python k8s_namespace_vuln_report.py --profile production
+# or: python3 k8s_namespace_vuln_report.py --profile production
 ```
 
 ## Output
@@ -202,5 +245,5 @@ Structured report keyed by namespace. Each namespace contains:
 
 1. **Container discovery** — queries `KubernetesProtection` for containers that have been image-assessed and have at least one known vulnerability. By default only running containers are included.
 2. **Image deduplication** — within each namespace, containers sharing the same `image_digest` are collapsed into a single image entry, avoiding redundant API calls.
-3. **Vulnerability lookup** — for each unique image, CVE details are fetched from `ContainerVulnerabilities` using the `container_id` as the join key, with full pagination.
+3. **Vulnerability lookup** — for each unique image, CVE details are fetched from `ContainerVulnerabilities` using the `container_id` as the join key, with full pagination. Fetches run in parallel across 20 threads.
 4. **Report assembly** — results are aggregated by namespace and sorted by severity count (CRITICAL → HIGH → MEDIUM → LOW → alphabetical).

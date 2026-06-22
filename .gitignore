@@ -58,3 +58,6 @@ Icon?
 
 # Claude Code
 .claude/
+
+# UV
+uv.lock

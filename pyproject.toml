@@ -1,0 +1,10 @@
+[project]
+name = "k8s-vuln-report"
+version = "0.1.0"
+description = "Reports container image vulnerabilities from CrowdStrike Falcon, grouped by Kubernetes namespace. For each namespace it shows affected images, CVE IDs, CVSS scores, severity, fix availability, and exploit status."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "crowdstrike-falconpy==1.6.1",
+    "flask==3.1.3",
+]
