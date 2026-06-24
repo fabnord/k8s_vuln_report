@@ -260,8 +260,11 @@ def main():
         if done % 10 == 0 or done == total:
             print(f"  Fetching vulns: {done}/{total} images …", end="\r", flush=True)
 
-    vuln_cache = fetch_vulns_parallel(cv, ns_image_map, progress_cb=_cli_progress)
+    vuln_cache, rate_limited = fetch_vulns_parallel(cv, ns_image_map, progress_cb=_cli_progress)
     print()  # newline after progress line
+    if rate_limited:
+        print(f"  Warning: {rate_limited} image(s) skipped due to API rate limiting — report may be incomplete.",
+              file=sys.stderr)
 
     report = assemble_report(ns_image_map, vuln_cache, args.severity, args.min_vulns)
 

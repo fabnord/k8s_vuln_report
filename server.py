@@ -8,8 +8,16 @@ Usage:
     python3 server.py
     python3 server.py --port 8080
     python3 server.py --client_id ID --client_secret SECRET --base_url us1
+
+Debug mode:
+    Set DEV_MODE=1 in the environment to enable Flask debug mode.
+    WARNING: This enables the Werkzeug interactive debugger which exposes a
+    Python REPL in the browser. Never use DEV_MODE=1 on a shared or
+    network-accessible machine.
 """
 import json
+import logging
+import os
 import re
 from argparse import ArgumentParser, RawTextHelpFormatter
 
@@ -26,6 +34,7 @@ except ImportError:
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core import (
+    RateLimitError,
     assemble_report,
     fetch_all_clusters,
     fetch_all_containers,
@@ -34,10 +43,35 @@ from core import (
 )
 from falconpy_auth import get_falcon_credentials
 
+log = logging.getLogger(__name__)
+
 app = Flask(__name__, static_folder=".")
 
 _VALID_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW"}
 _IDENTIFIER_RE = re.compile(r'^[a-zA-Z0-9_.:\-/]{1,256}$')
+
+_GENERIC_API_ERROR = "API error — check server logs for details."
+
+
+# ── Security headers ───────────────────────────────────────────────────────
+
+@app.after_request
+def set_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"]        = "DENY"
+    response.headers["Referrer-Policy"]        = "no-referrer"
+    # Tight CSP: page only loads local resources (no inline scripts/styles
+    # beyond what is already inline in index.html, which uses nonces via
+    # the meta tag). Adjust if you add external resources.
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "connect-src 'self';"
+    )
+    return response
 
 
 # ── Credential management ──────────────────────────────────────────────────
@@ -85,8 +119,9 @@ def api_clusters():
         clusters = fetch_all_clusters(k8s)
         names = sorted({c["cluster_name"] for c in clusters if c.get("cluster_name")})
         return jsonify(names)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        log.exception("Error in /api/clusters")
+        return jsonify({"error": _GENERIC_API_ERROR}), 500
 
 
 @app.route("/api/namespaces")
@@ -113,8 +148,9 @@ def api_namespaces():
         containers = fetch_all_containers(k8s, fql)
         namespaces = sorted({c.get("namespace", "") for c in containers if c.get("namespace")})
         return jsonify(namespaces)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        log.exception("Error in /api/namespaces")
+        return jsonify({"error": _GENERIC_API_ERROR}), 500
 
 
 @app.route("/api/report")
@@ -178,7 +214,8 @@ def api_report():
                 for dk, meta in imgs.items()
             ]
             vuln_cache: dict = {}
-            processed = 0
+            processed    = 0
+            rate_limited = 0
             with ThreadPoolExecutor(max_workers=20) as pool:
                 future_map = {
                     pool.submit(fetch_vulns_for_container, cv, meta["container_id"]): (ns, dk, meta)
@@ -188,18 +225,28 @@ def api_report():
                     ns_key, dk, meta = future_map[future]
                     try:
                         vuln_cache[(ns_key, dk)] = future.result()
-                    except Exception as exc:
+                    except RateLimitError:
                         vuln_cache[(ns_key, dk)] = []
-                        yield sse("status", {"msg": f"Warning: {meta['container_id']}: {exc}"})
+                        rate_limited += 1
+                    except Exception:
+                        log.exception("Failed to fetch vulns for %s", meta["container_id"])
+                        vuln_cache[(ns_key, dk)] = []
                     processed += 1
                     if processed % 5 == 0 or processed == total_images:
                         yield sse("progress", {"done": processed, "total": total_images})
 
+            if rate_limited:
+                yield sse("status", {
+                    "msg": f"Warning: {rate_limited} image(s) skipped due to API rate limiting — report may be incomplete.",
+                    "warning": True,
+                })
+
             report = assemble_report(ns_image_map, vuln_cache, severity)
             yield sse("done", {"report": report})
 
-        except Exception as e:
-            yield sse("error", {"msg": str(e)})
+        except Exception:
+            log.exception("Unhandled error in /api/report SSE stream")
+            yield sse("error", {"msg": _GENERIC_API_ERROR})
 
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -216,11 +263,22 @@ def parse_args():
     parser.add_argument("-p", "--profile",       default="default")
     parser.add_argument("--port",  type=int, default=5000)
     parser.add_argument("--host",  default="127.0.0.1")
-    parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    debug = os.environ.get("DEV_MODE", "").strip() == "1"
+    if debug:
+        import sys
+        print(
+            "\n  *** DEV_MODE=1: Werkzeug interactive debugger is ENABLED ***\n"
+            "  *** Anyone with browser access can execute arbitrary code.  ***\n"
+            "  *** Never use this on a shared or network-accessible host.  ***\n",
+            file=sys.stderr,
+        )
+
     args = parse_args()
     creds = get_falcon_credentials(
         profile=args.profile,
@@ -233,4 +291,4 @@ if __name__ == "__main__":
     print(f"  Client ID   : {creds['client_id'][:8]}…")
     print(f"  Dashboard   : http://{args.host}:{args.port}/")
     print()
-    app.run(host=args.host, port=args.port, debug=args.debug, threaded=True)
+    app.run(host=args.host, port=args.port, debug=debug, threaded=True)

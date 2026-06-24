@@ -17,6 +17,10 @@ SEVERITY_LEVELS = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
 VULN_DESC_MAX_LEN = 300
 
 
+class RateLimitError(Exception):
+    """Raised when the Falcon API returns HTTP 429 (rate limit exceeded)."""
+
+
 def build_image_ref(c: dict) -> str:
     reg  = (c.get("image_registry") or "").rstrip("/")
     repo = c.get("image_repository") or ""
@@ -89,6 +93,11 @@ def fetch_vulns_for_container(cv: ContainerVulnerabilities,
             offset=offset,
             sort="cvss_score.desc",
         )
+        if resp["status_code"] == 429:
+            raise RateLimitError(
+                f"Falcon API rate limit exceeded while fetching vulns for {container_id}. "
+                "The report may be incomplete."
+            )
         if resp["status_code"] not in (200, 201):
             break
         resources = resp["body"].get("resources") or []
@@ -125,8 +134,13 @@ def fetch_vulns_parallel(
     ns_image_map: dict[str, dict[str, dict]],
     progress_cb: Callable[[int, int], None] | None = None,
     max_workers: int = 20,
-) -> dict[tuple, list[dict]]:
-    """Fetch vulns for all images in parallel. Returns (ns, digest_key) -> vuln list."""
+) -> tuple[dict[tuple, list[dict]], int]:
+    """Fetch vulns for all images in parallel.
+
+    Returns (vuln_cache, rate_limited_count) where vuln_cache maps
+    (ns, digest_key) -> vuln list and rate_limited_count is the number
+    of images skipped due to HTTP 429 responses.
+    """
     all_tasks = [
         (ns, dk, meta)
         for ns, imgs in ns_image_map.items()
@@ -135,6 +149,7 @@ def fetch_vulns_parallel(
     total = len(all_tasks)
     vuln_cache: dict[tuple, list[dict]] = {}
     processed = 0
+    rate_limited = 0
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_map = {
@@ -145,6 +160,10 @@ def fetch_vulns_parallel(
             ns_key, dk, meta = future_map[future]
             try:
                 vuln_cache[(ns_key, dk)] = future.result()
+            except RateLimitError as exc:
+                print(f"  Warning: {exc}", file=sys.stderr)
+                vuln_cache[(ns_key, dk)] = []
+                rate_limited += 1
             except Exception as exc:
                 print(
                     f"  Warning: failed to fetch vulns for {meta['container_id']}: {exc}",
@@ -155,7 +174,7 @@ def fetch_vulns_parallel(
             if progress_cb:
                 progress_cb(processed, total)
 
-    return vuln_cache
+    return vuln_cache, rate_limited
 
 
 def assemble_report(
