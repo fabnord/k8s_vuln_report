@@ -422,7 +422,7 @@ let currentSSE = null;
 
 // ── Utils ──────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
-const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const sevColor = s => ({CRITICAL:'#ff3d3d',HIGH:'#ff8c00',MEDIUM:'#f5c400',LOW:'#3ecf74'}[s]||'#5a6e85');
 const topSev = sc => ['CRITICAL','HIGH','MEDIUM','LOW'].find(s => (sc[s]||0) > 0) || 'LOW';
 const fmtDate = iso => iso ? iso.slice(0,10) : '—';
